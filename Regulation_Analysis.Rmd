@@ -1,0 +1,569 @@
+---
+title: "Regulatory Analysis"
+author: "Andrew Burr"
+date: "January 26, 2017"
+output: html_document
+---
+
+
+
+
+```{r setup, include=FALSE}
+
+require(limma)
+require(knitr)
+require(edgeR)
+require(biomaRt)
+require(DESeq2)
+require(edgeR)
+require(ggplot2)
+require(reshape)
+require(reshape2)
+require(stringdist)
+require(apcluster)
+require(qqman)
+require(Biostrings)
+require(motifRG)
+require(stringr)
+require(scales)
+require(NMF)
+
+
+#force R to not use scientific notation
+options(scipen=999)
+
+#compute various information about the alignments.
+alignmentInfo <- function(alignments){
+  
+  
+  #find the distance alignment occured from 3 prime end of transcript
+  alignments$bp_end <- alignments$length - alignments$bp_start
+  #count the number of mismatches
+  alignments$number_mismatches <- str_count(alignments$mismatches, ">")
+  
+  #finding total targets for each piRNA
+  target_number <- as.data.frame(table(unique(subset(alignments, select = c(piRNA,hgnc_symbol)))[,1]))
+  colnames(target_number) <- c("piRNA", "targets")
+  alignments <- merge(alignments, target_number, by = "piRNA")
+  
+  #find total time gene is targeted by unique piRNA
+  target_number <- as.data.frame(table(unique(subset(alignments, select = c(piRNA,hgnc_symbol)))[,2]))
+  colnames(target_number) <- c("hgnc_symbol", "gene_frequency")
+  alignments <- merge(alignments, target_number, by = "hgnc_symbol")
+  
+  #denote weather the piRNA and/or the gene is differentially expressed
+  alignments$DE_piRNA <- FALSE
+  alignments$DE_piRNA[alignments$piRNA %in% rownames(voom_top)] <- TRUE
+
+  alignments$DE_gene <- FALSE
+  alignments$DE_gene[alignments$hgnc_symbol %in% top_genes$hgnc_symbol] <- TRUE
+
+  #denote whether the 1T 10A bias is seen
+  #alignments$`1T` <-  ifelse(sapply(alignments$piRNA, substr,1,1) == "T",TRUE,FALSE) 
+  #alignments$`10A` <-  ifelse(sapply(alignments$piRNA, substr,10,10) == "A",TRUE,FALSE)
+  #alignments$`1T10A` <- ifelse((alignments$`1T` & alignments$`10A`), TRUE, FALSE)
+  
+  
+  target_number <- as.data.frame(table(unique(subset(alignments, select = c(piRNA,transcript)))[,2]))
+  colnames(target_number) <- c("transcript", "targets")
+  rpkm <- merge(subset(alignments, select = c(transcript, length)) , target_number, by = "transcript")
+  rpkm$rpkm <- rpkm$targets/((rpkm$length)/1000)
+  
+  #alignments <- merge(alignments, subset(rpkm, select = c(transcript, rpkm)), by = "transcript")
+  
+  return(alignments)
+}
+
+
+#load in the gene expression from RNA seq experiment
+gene_expression <- read.csv("../../RNAseq/data/star_v5_all_genes.txt", sep = ",", stringsAsFactors = F)[,c(1,2,8)]
+#load in the differentially expressed genes info from the RNA seq experiment
+top_genes <- read.csv("~/MEGA/piRNA_project/RNAseq/data/star_v5_top_genes.txt", stringsAsFactors=FALSE)[,c(1,2,8)]
+
+```
+
+
+**piRNA Differential Expression**
+
+```{r piRNA_import_reads, echo = FALSE}
+
+#import the desired read counts
+read_counts <- read.delim("../sRNA_counts/small_sa_og_norRNA_25_33_counts_table.txt", sep=",", stringsAsFactors=FALSE, row.names = 1)[,]
+#select only the cell lines used in the experiment
+read_counts <- read_counts[,4:19]
+#switch the cell lines
+read_counts <- read_counts[,c(9:16, 1:8)]
+
+
+#keep only reads in the subset of data
+noncRNA <- read.table("../data/small_sa_og_norRNA_25_33_noncRNA_list.txt", header = FALSE, stringsAsFactors = FALSE)
+read_counts <- read_counts[(rownames(read_counts) %in% noncRNA$V1),]
+
+#remove low counts for differential expression
+read_counts <- read_counts[rowSums(read_counts > 20) >= 6,]
+
+#cell sample 3 and 11 were low read loutliers. Remove them from the data
+read_counts <- read_counts[,-c(3,11)]
+
+```
+
+
+
+
+
+```{r piRNA_read_normalization, echo = FALSE}
+
+#factor for the cell tyoe
+celltype <- factor(c(rep("D",7),  #D is differentiated of non-GSC
+                     rep("S",7)), #S is stem or GSC
+                   levels = c("D", "S"))
+#factor for the paired samples
+cellline <- factor(c(1:7, 1:7), levels = 1:7)
+#design matix of the experiment
+design <-model.matrix(~cellline + celltype)
+
+#converting to DGEList and keeping only expressions significantly above 0
+dge_counts <- DGEList(counts=read_counts)
+#dge_counts <- dge_counts[rowSums(cpm(dge_counts) >=1) >=7,]
+dge_counts <- calcNormFactors(dge_counts, method = c("TMM"))
+
+#voom normalization
+voom_counts <- cpm(dge_counts,log=TRUE, prior.count = 3)
+#MDSplot
+plotMDS(dge_counts, labels = colnames(read_counts), cex = 1, main = "MDS Plot for piRNA Expressions", dim.plot = c(1,2))
+
+#create the linear fit for the counts
+fit <- eBayes(lmFit(voom_counts,design), trend = TRUE)
+
+
+#voom fold changesmiRNA_alignments
+voom_sRNA <- topTable(fit, coef = "celltypeS", sort.by="logFC", number =nrow(voom_counts) )
+voom_top <- topTable(fit,coef = "celltypeS", sort.by="logFC", number =nrow(voom_counts),lfc = 2,p.value = 0.05)
+#voomNormExp <- voomCounts$E
+rm(celltype);rm(design.array); rm(design); rm(dge_counts)
+#my name function
+
+#adding the reads names into its own column for merging
+voom_sRNA$sRNA <- rownames(voom_sRNA)
+voom_top_sRNA <- voom_top
+voom_top_sRNA$sRNA <- rownames(voom_top_sRNA)
+
+
+```
+
+
+**Targeting Sequence Differential Expression**
+
+
+```{r targeting_import_reads, echo = FALSE}
+
+#import the desired read counts
+read_counts <- read.delim("../sRNA_counts/small_sa_og_norRNA_25_33_counts_table.txt", sep=",", stringsAsFactors=FALSE, row.names = 1)
+read_counts <- read_counts[,4:19]
+#sort the samples so
+read_counts <- read_counts[,c(9:16, 1:8)]
+
+
+#keep only reads in the subset of data
+noncRNA <- read.table("../data/small_sa_og_norRNA_25_33_noncRNA_list.txt", header = FALSE, stringsAsFactors = FALSE)
+read_counts <- read_counts[(rownames(read_counts) %in% noncRNA$V1),]
+
+
+#shorten the reads to just the predicted targeting sequence
+read_counts$short <- strtrim(rownames(read_counts),21)
+read_counts <- aggregate(. ~ short, data = read_counts, FUN = sum, na.rm = TRUE)
+rownames(read_counts) <- read_counts$short
+read_counts <- subset(read_counts, select = -short)
+
+
+#remove low counts
+read_counts <- read_counts[rowSums(read_counts > 20) >= 6,]
+#remove the outlier samples
+read_counts <- read_counts[,-c(3,11)]
+```
+
+
+
+
+
+```{r targeting_read_normalization, echo = FALSE}
+
+#factor for the cell tyoe
+celltype <- factor(c(rep("D",7),  #D is differentiated of non-GSC
+                     rep("S",7)), #S is stem or GSC
+                   levels = c("D", "S"))
+#factor for the paired samples
+cellline <- factor(c(1:7, 1:7), levels = 1:7)
+#design matix of the experiment
+design <-model.matrix(~cellline + celltype)
+
+#converting to DGEList and keeping only expressions significantly above 0
+dge_counts <- DGEList(counts=read_counts)
+#dge_counts <- dge_counts[rowSums(cpm(dge_counts) >=1) >=7,]
+dge_counts <- calcNormFactors(dge_counts, method = c("TMM"))
+#voom normalization
+voom_counts <- cpm(dge_counts, log = TRUE, prior.count = 3)
+
+#MDSplot
+plotMDS(voom_counts, labels = colnames(read_counts), cex = 1, main = "MDS Plot for piRNA Expressions", dim.plot = c(1,2))
+
+#create the linear fit for the data
+fit <- eBayes(lmFit(voom_counts,design), trend = TRUE)
+
+#sort fold changes sorted by p-value
+voom_sRNA <- topTable(fit, coef = "celltypeB", sort.by="logFC", number =nrow(voom_counts) )
+voom_top <- topTable(fit,coef = "celltypeB", sort.by="logFC", number =nrow(voom_counts),lfc = 2,p.value = 0.05)
+
+#adding the reads names into its own column for merging
+voom_sRNA$sRNA <- rownames(voom_sRNA)
+voom_top_sRNA <- voom_top
+voom_top_sRNA$sRNA <- rownames(voom_top_sRNA)
+
+
+```
+
+
+*Alignment Analysis*
+
+Below are the code chunks for analyzing the alignments gathered between each piRNA and the targeting sequences.
+
+
+**Coding DNA sequence (CDS)**
+
+
+```{r cds_alignments, echo = FALSE}
+
+
+#loading in the bowtie alignments from piRNA against cDNA
+alignments <- read.delim("../alignments/targeting_alignments/cDNA/sa_og_norRNA_25_33_noncRNA_21bp_list_alignments_CDS_v3.txt", header=FALSE, stringsAsFactors=FALSE)[,]
+#name the columsn appropraitelu
+colnames(alignments) <- c("piRNA", "gene", "bp_start", "mismatches")
+
+#the alignment headers are based ont he sequence library used
+#sort the heaader labeled "gene" into various used groups
+alignments$hgnc_symbol <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = " "))[1]})
+alignments$transcript <-  sapply(alignments$hgnc_symbol, FUN = function(x){unlist(strsplit(x, split = "\\|"))[2]})
+alignments$hgnc_symbol <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = "\\|"))[1]})
+alignments$length <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = " "))[2]})
+alignments$length <-  as.numeric(sapply(alignments$length, sub, pattern =  "transcript_length:", replacement =  ""))
+
+#generate information about the alignments
+alignments <- alignmentInfo(alignments)
+
+```
+
+```{r cds_coexpression}
+
+#create the coexpression table
+coexpression <- unique(merge(subset(voom_sRNA, select = c(sRNA, logFC, adj.P.Val)),
+                      subset(alignments, select = c(piRNA, hgnc_symbol, number_mismatches, DE_gene, DE_piRNA)),
+                      by.x = "sRNA", by.y = "piRNA"))
+colnames(coexpression)[1:3] <- c("piRNA", "piRNA_logFC", "piRNA_pval")
+coexpression <-merge(coexpression,
+                     subset(gene_expression, select = c(hgnc_symbol, logFC, adj.P.Val)),
+                     by = "hgnc_symbol")
+colnames(coexpression)[8:9] <- c( "gene_logFC", "gene_pval")
+
+
+
+
+#pdf("../../figures/cds_coexpression.pdf", 6,4)
+
+#create the correlation plot
+ggplot(data = coexpression,aes( y = gene_logFC, x = piRNA_logFC)) +
+  geom_rect(aes(xmin = 2, xmax =ceiling(max(coexpression$piRNA_logFC)), ymax = -2, ymin = floor(min(coexpression$gene_logFC))), fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_rect(aes(xmax = -2, xmin = floor(min(coexpression$piRNA_logFC)), ymin = 2, ymax = ceiling(max(coexpression$gene_logFC))),fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_point(aes(color = gene_pval, y = gene_logFC, x = piRNA_logFC, alpha = 1-piRNA_pval), size = .9) +
+  scale_color_gradientn(name ="Gene Pval" , colors = c("darkblue","lightblue","red"),breaks = c( .01,.1,1), limits = c(0,1), values = c(.0000001, .1, 1)) +
+  scale_alpha_continuous( labels = c(1,.1,.05,.001), limits = c(.001,  1), breaks = c( .001,.05,.1,1), name = "piRNA Pval") + 
+  geom_hline(aes(yintercept = 2), linetype ="dotted") +
+  geom_hline(aes(yintercept = -2), linetype = "dotted") +
+  geom_vline(aes(xintercept = 2), linetype ="dotted") +
+  geom_vline(aes(xintercept = -2), linetype ="dotted") +
+  scale_y_continuous(breaks = c(seq((floor(min(coexpression$gene_logFC))), ceiling(max(coexpression$gene_logFC)), 1))) +
+  scale_x_continuous(breaks = c(seq((floor(min(coexpression$piRNA_logFC))), ceiling(max(coexpression$piRNA_logFC)), 1))) +
+  #scale_linetype_manual(guide = FALSE) +
+ 
+guides(linetype = FALSE) +   ggtitle("CDS Targeting: Gene LFC ~ piRNA LFC ") +
+  #scale_color_manual(values = c("black", "blue")) + 
+  xlab("piRNA LFC") +
+  ylab("Gene LFC") +
+  #scale_size(range =c(.5,1.5)) + 
+ # labs(  color = "Gene Pval") +
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank()) 
+
+
+#dev.off()
+
+
+
+
+
+```
+
+
+
+**3UTR**
+
+
+```{r 3UTR_alignments, echo = FALSE}
+
+
+#loading in the bowtie alignments from piRNA against cDNA
+alignments <- read.delim("../alignments/targeting_alignments/cDNA/sa_og_norRNA_25_33_noncRNA_21bp_list_alignments_3UTR_v3.txt", header=FALSE, stringsAsFactors=FALSE)[,]
+#label the columns approriately
+colnames(alignments) <- c("piRNA", "gene", "bp_start", "mismatches")
+
+alignments <- unique(alignments)
+
+#the alignment headers are based ont he sequence library used
+#sort the heaader labeled "gene" into various used groups
+alignments$hgnc_symbol <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = " "))[1]})
+alignments$hgnc_symbol <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = "\\|"))[1]})
+alignments$transcript <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = "\\|"))[2]})
+alignments$transcript <-  sapply(alignments$transcript, FUN = function(x){unlist(strsplit(x, split = " "))[1]})
+alignments$length <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = " "))[2]})
+alignments$length <-  as.numeric(sapply(alignments$length, sub, pattern =  "transcript_length:", replacement =  ""))
+
+
+#calculate info for each alignment
+alignments <- alignmentInfo(alignments)
+
+```
+
+
+
+```{r 3UTR_coexpression}
+
+
+#create the coexpression table
+coexpression <- unique(merge(subset(voom_sRNA, select = c(sRNA, logFC, adj.P.Val)),
+                      subset(alignments, select = c(piRNA, hgnc_symbol, number_mismatches, DE_gene, DE_piRNA)),
+                      by.x = "sRNA", by.y = "piRNA"))
+colnames(coexpression)[1:3] <- c("piRNA", "piRNA_logFC", "piRNA_pval")
+coexpression <-merge(coexpression,
+                     subset(gene_expression, select = c(hgnc_symbol, logFC, adj.P.Val)),
+                     by = "hgnc_symbol")
+colnames(coexpression)[8:9] <- c( "gene_logFC", "gene_pval")
+
+
+#pdf("../../figures/3UTR_coexpression.pdf", 6,4)
+ 
+#create the correlation plot 
+ggplot(data = coexpression,aes( y = gene_logFC, x = piRNA_logFC)) +
+  geom_rect(aes(xmin = 2, xmax =ceiling(max(coexpression$piRNA_logFC)), ymax = -2, ymin = floor(min(coexpression$gene_logFC))), fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_rect(aes(xmax = -2, xmin = floor(min(coexpression$piRNA_logFC)), ymin = 2, ymax = ceiling(max(coexpression$gene_logFC))),fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_point(aes(color = gene_pval, y = gene_logFC, x = piRNA_logFC, alpha = 1-piRNA_pval), size = .9) +
+  scale_color_gradientn(name ="Gene Pval" , colors = c("darkblue","lightblue","red"),breaks = c( .01,.1,1), limits = c(0,1), values = c(.0000001, .1, 1)) +
+  scale_alpha_continuous( labels = c(1,.1,.05,.001), limits = c(.001,  1), breaks = c( .001,.05,.1,1), name = "piRNA Pval") + 
+  geom_hline(aes(yintercept = 2), linetype ="dotted") +
+  geom_hline(aes(yintercept = -2), linetype = "dotted") +
+  geom_vline(aes(xintercept = 2), linetype ="dotted") +
+  geom_vline(aes(xintercept = -2), linetype ="dotted") +
+  scale_y_continuous(breaks = c(seq((floor(min(coexpression$gene_logFC))), ceiling(max(coexpression$gene_logFC)), 1))) +
+  scale_x_continuous(breaks = c(seq((floor(min(coexpression$piRNA_logFC))), ceiling(max(coexpression$piRNA_logFC)), 1))) +
+  #scale_linetype_manual(guide = FALSE) +
+ 
+guides(linetype = FALSE) +   ggtitle("3UTR Targeting: Gene LFC ~ piRNA LFC ") +
+  #scale_color_manual(values = c("black", "blue")) + 
+  xlab("piRNA LFC") +
+  ylab("Gene LFC") +
+  #scale_size(range =c(.5,1.5)) + 
+ # labs(  color = "Gene Pval") +
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank()) 
+
+
+#dev.off()
+
+
+```
+
+
+**cDNA**
+
+
+```{r cDNA_alignments, echo = FALSE}
+
+#loading in the bowtie alignments from piRNA against cDNA
+alignments <- read.delim("../alignments/targeting_alignments/cDNA/sa_og_norRNA_25_33_noncRNA_21bp_list_alignments_cDNA_v3.txt", header=FALSE, stringsAsFactors=FALSE)[,]
+colnames(alignments) <- c("piRNA", "gene", "bp_start", "mismatches")
+
+alignments <- unique(alignments)
+
+#split the alignment reference name into the appropraite columns
+alignments$hgnc_symbol <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = " "))[2]})
+alignments$transcript <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = " "))[1]})
+alignments$length <- sapply(alignments$gene, FUN = function(x){unlist(strsplit(x, split = " "))[3]})
+alignments$length <-  as.numeric(sapply(alignments$length, sub, pattern =  "transcript_length:", replacement =  ""))
+
+#generate alignment info
+alignments <- alignmentInfo(alignments)
+
+
+
+```
+
+
+```{r cDNA_coexpression}
+
+#create the coexpression table
+coexpression <- unique(merge(subset(voom_sRNA, select = c(sRNA, logFC, adj.P.Val)),
+                      subset(alignments, select = c(piRNA, hgnc_symbol, number_mismatches, DE_gene, DE_piRNA)),
+                      by.x = "sRNA", by.y = "piRNA"))
+colnames(coexpression)[1:3] <- c("piRNA", "piRNA_logFC", "piRNA_pval")
+coexpression <-merge(coexpression,
+                     subset(gene_expression, select = c(hgnc_symbol, logFC, adj.P.Val)),
+                     by = "hgnc_symbol")
+colnames(coexpression)[8:9] <- c( "gene_logFC", "gene_pval")
+
+
+
+#pdf("../../figures/cDNA_coexpression.pdf", 6,4)
+ggplot(data = coexpression,aes( y = gene_logFC, x = piRNA_logFC)) +
+  geom_rect(aes(xmin = 2, xmax =ceiling(max(coexpression$piRNA_logFC)), ymax = -2, ymin = floor(min(coexpression$gene_logFC))), fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_rect(aes(xmax = -2, xmin = floor(min(coexpression$piRNA_logFC)), ymin = 2, ymax = ceiling(max(coexpression$gene_logFC))),fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_point(aes(color = gene_pval, y = gene_logFC, x = piRNA_logFC, alpha = 1-piRNA_pval), size = .9) +
+  scale_color_gradientn(name ="Gene Pval" , colors = c("darkblue","lightblue","red"),breaks = c( .01,.1,1), limits = c(0,1), values = c(.0000001, .1, 1)) +
+  scale_alpha_continuous( labels = c(1,.1,.05,.001), limits = c(.001,  1), breaks = c( .001,.05,.1,1), name = "piRNA Pval") + 
+  geom_hline(aes(yintercept = 2), linetype ="dotted") +
+  geom_hline(aes(yintercept = -2), linetype = "dotted") +
+  geom_vline(aes(xintercept = 2), linetype ="dotted") +
+  geom_vline(aes(xintercept = -2), linetype ="dotted") +
+  scale_y_continuous(breaks = c(seq((floor(min(coexpression$gene_logFC))), ceiling(max(coexpression$gene_logFC)), 1))) +
+  scale_x_continuous(breaks = c(seq((floor(min(coexpression$piRNA_logFC))), ceiling(max(coexpression$piRNA_logFC)), 1))) +
+  #scale_linetype_manual(guide = FALSE) +
+ 
+guides(linetype = FALSE) +   ggtitle("cDNA Targeting: Gene LFC ~ piRNA LFC ") +
+  #scale_color_manual(values = c("black", "blue")) + 
+  xlab("piRNA LFC") +
+  ylab("Gene LFC") +
+  #scale_size(range =c(.5,1.5)) + 
+ # labs(  color = "Gene Pval") +
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank()) 
+
+
+
+
+#dev.off()
+
+
+```
+
+**Ping Pong Calculation**
+
+The ping-pong method asserts that piRNA generated from the method will have a base pair biase at the 1 and 10 position. Conflicting studies have shown that this method is and is not present in mRNA silencing. This code finds piRNA reads that aligned to mRNA as a possible point of biogenesis and finds mRNA sequences that had a targeting piRNA. The end result are piRNA sequenences that could haev been generated from the ping-pong method targeting mRNA sequences. These sequences were analyzed with MEME later.
+
+```{r cDNA_piRNA_pingpong}
+
+#find piRNA with a predicted mRNA target
+ping <- unique(subset(alignments, select = c(piRNA, hgnc_symbol)))
+
+#loading in the bowtie alignments for predicted biogenesis from cDNA
+pong <- read.delim("../alignments/biogenesis_alignments/sa_og_norRNA_25_33_noncRNA_cDNA_v0.txt", header=FALSE, stringsAsFactors=FALSE)[,]
+colnames(pong) <- c("piRNA", "gene", "bp_start", "mismatches")
+pong <- unique(pong)
+
+#convert the gene to the approprate columns
+pong$hgnc_symbol <- sapply(pong$gene, FUN = function(x){unlist(strsplit(x, split = " "))[2]})
+pong$transcript <- sapply(pong$gene, FUN = function(x){unlist(strsplit(x, split = " "))[1]})
+#convert the length of the target strand
+pong$length <- sapply(pong$gene, FUN = function(x){unlist(strsplit(x, split = " "))[3]})
+pong$length <-  as.numeric(sapply(pong$length, sub, pattern =  "transcript_length:", replacement =  ""))
+
+#calculate alignment infor
+pong <- alignmentInfo(pong)
+#find unique piRNA that could haev come from an mRNA
+pong <- unique(subset(pong, select = c(piRNA, hgnc_symbol)))
+#merge the two to find piRNA that could have come from mRNA cleavage
+pong <- pong$piRNA[pong$hgnc_symbol %in% ping$hgnc_symbol]
+
+
+#find piRNA that could have cleaved mRNA to generate additional piRNA
+ping <- ping$piRNA[ping$hgnc_symbol %in% pong$hgnc_symbol]
+```
+
+
+**Promoter**
+
+```{r promotor_alignments, echo = FALSE}
+
+#conversion table for converting RefSeq ids to HGNC gene symbols
+conversion <- read.delim("../../reference_sets/hgnc_to_refseq.txt", stringsAsFactors=FALSE, sep = "\t")
+colnames(conversion) <- c("hgnc_symbol", "refseq_id")
+
+
+#loading in the bowtie alignments from piRNA against cDNA
+alignments <- read.delim("../alignments/targeting_alignments/cDNA/sa_og_norRNA_25_33_noncRNA_21bp_list_alignments_upstream_v3.txt", header=FALSE, stringsAsFactors=FALSE)[,]
+colnames(alignments) <- c("piRNA", "gene", "bp_start", "mismatches")
+
+alignments <- unique(alignments)
+
+alignments <- merge(alignments, conversion, by.x = "gene", by.y = "refseq_id")
+
+alignments$length <-  1000
+
+
+ #finding total targets for each piRNA
+  target_number <- as.data.frame(table(unique(subset(alignments, select = c(piRNA,hgnc_symbol)))[,1]))
+  colnames(target_number) <- c("piRNA", "targets")
+  alignments <- merge(alignments, target_number, by = "piRNA")
+  
+  #find total time gene is targeted by unique piRNA
+  target_number <- as.data.frame(table(unique(subset(alignments, select = c(piRNA,hgnc_symbol)))[,2]))
+  colnames(target_number) <- c("hgnc_symbol", "gene_frequency")
+  alignments <- merge(alignments, target_number, by = "hgnc_symbol")
+
+  
+
+
+```
+
+
+```{r promotor_coexpression}
+
+#create the coexpression table
+coexpression <- unique(merge(subset(voom_sRNA, select = c(sRNA, logFC, adj.P.Val)),
+                      subset(alignments, select = c(piRNA, hgnc_symbol)),
+                      by.x = "sRNA", by.y = "piRNA"))
+colnames(coexpression)[1:3] <- c("piRNA", "piRNA_logFC", "piRNA_pval")
+coexpression <-merge(coexpression,
+                     subset(gene_expression, select = c(hgnc_symbol, logFC, adj.P.Val)),
+                     by = "hgnc_symbol")
+colnames(coexpression)[5:6] <- c( "gene_logFC", "gene_pval")
+
+
+
+#pdf("../../figures/promotor_coexpression.pdf", 6,4)
+
+#plot of the correlatiosn between expression data
+ggplot(data = coexpression,aes( y = gene_logFC, x = piRNA_logFC)) +
+  geom_rect(aes(xmin = 2, xmax =ceiling(max(coexpression$piRNA_logFC)), ymax = -2, ymin = floor(min(coexpression$gene_logFC))), fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_rect(aes(xmax = -2, xmin = floor(min(coexpression$piRNA_logFC)), ymin = 2, ymax = ceiling(max(coexpression$gene_logFC))),fill = "white", color = "blue", alpha = 1/20000, size = .7) + 
+  geom_point(aes(color = gene_pval, y = gene_logFC, x = piRNA_logFC, alpha = 1-piRNA_pval), size = .9) +
+  scale_color_gradientn(name ="Gene Pval" , colors = c("darkblue","lightblue","red"),breaks = c( .01,.1,1), limits = c(0,1), values = c(.0000001, .1, 1)) +
+  scale_alpha_continuous( labels = c(1,.1,.05,.001), limits = c(.001,  1), breaks = c( .001,.05,.1,1), name = "piRNA Pval") + 
+  geom_hline(aes(yintercept = 2), linetype ="dotted") +
+  geom_hline(aes(yintercept = -2), linetype = "dotted") +
+  geom_vline(aes(xintercept = 2), linetype ="dotted") +
+  geom_vline(aes(xintercept = -2), linetype ="dotted") +
+  scale_y_continuous(breaks = c(seq((floor(min(coexpression$gene_logFC))), ceiling(max(coexpression$gene_logFC)), 1))) +
+  scale_x_continuous(breaks = c(seq((floor(min(coexpression$piRNA_logFC))), ceiling(max(coexpression$piRNA_logFC)), 1))) +
+  #scale_linetype_manual(guide = FALSE) +
+ 
+guides(linetype = FALSE) +   ggtitle("Promoter Region Targeting: Gene LFC ~ piRNA LFC ") +
+  #scale_color_manual(values = c("black", "blue")) + 
+  xlab("piRNA LFC") +
+  ylab("Gene LFC") +
+  #scale_size(range =c(.5,1.5)) + 
+ # labs(  color = "Gene Pval") +
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank()) 
+
+#dev.off()
+
+
+```
+
