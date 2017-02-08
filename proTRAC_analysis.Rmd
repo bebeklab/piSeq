@@ -85,32 +85,9 @@ all_clusters$cell_type[1528:2929] <- "diff"
 ```
 
 
-```{r cluster_plots, echo = FALSE}
-
-#test <- all_clusters[(all_clusters$chromosome == 2 & (all_clusters$start > 68556068) & (all_clusters$start < 68836068)),  ]
-
-cluster_plot <- function(chromosome){
-  #create the data frame for ggplot to use
-  data <- all_clusters[all_clusters$chromosome == chromosome,]
-  
-  ggplot(data, aes(x=start, xend=end, y=cell_line, yend=cell_line, color= cell_type)) +
-    geom_segment(size=3) +
-    geom_point(size=3) +
-    geom_point(aes(x=end), size=2, shape = 18) +
-    ggtitle(paste("Chromosome", chromosome, collapse = " ")) + 
-    ylab("Cell Line") + 
-    xlab("Cluster Location") +
-    scale_x_continuous(labels = comma)
-}
-
-plots <- lapply(X = sort(unique(all_clusters$chromosome), decreasing = FALSE), FUN = cluster_plot)
-print(plots)
-
-```
 
 
-
-```{r manhattan, echo = FALSE}
+```{r data_processing, echo = FALSE}
 
 #have similar clusters become the same cluster
 
@@ -175,6 +152,121 @@ man_clusters <- man_clusters[man_clusters$cluster_count != 0,]
 
 man_clusters <- subset(man_clusters, select = c(chromosome,cell_type, cluster_count, cluster_number, start,end))
 #man_clusters$chromosome <- jitter(man_clusters$chromosome,amount = .49)
+
+
+```
+
+
+```{r lollipop, warning=FALSE}
+
+
+#make differentiated counts positive again
+
+
+#data for lollipop plot
+lollipop <- man_clusters[man_clusters$chromosome != "MT",]
+for(row in 1:nrow(lollipop)){
+  lollipop$x_cord[row] <- paste(lollipop$chromosome[row], lollipop$cell_type[row], collapse = " ")
+}
+
+chromosome_celltype <- c()
+for(chrom in c(as.character(1:22), "X","Y")){
+ chromosome_celltype[length(chromosome_celltype) + 1] <- paste(chrom, "stem", collapse = " ")
+ chromosome_celltype[length(chromosome_celltype) + 1] <- chrom
+ chromosome_celltype[length(chromosome_celltype) + 1] <- paste(chrom, "diff", collapse = " ") 
+}
+
+
+lollipop$x_cord <- factor(lollipop$x_cord,levels = chromosome_celltype)
+lollipop$start <- lollipop$start/1000000
+lollipop$end <- lollipop$end/1000000
+
+#lollipop$start_jitter <- jitter(lollipop$start,40)
+
+
+
+#vector holding chromosome info
+chromosome_info <- as.data.frame(c(248956422,242193529,198295559,190214555, 181538259, 170805979, 159345973 , 145138636, 138394717, 133797422,135086622, 133275309, 114364328, 107043718, 101991189,  90338345,  83257441,  80373285,  58617616, 64444167, 46709983 ,50818468, 156040895 ,  57227415)/1000000)
+colnames(chromosome_info) <- c("chromosome_length")
+chromosome_info$chromosome <- factor(c(as.character(1:22), "X","Y"), levels = levels(lollipop$x_cord))
+#chromosome_info$chromosome <- c(as.character(1:22), "X","Y")
+
+chromosome_info$centromere <- c(125,93.3,91,50.4,48.4,61,59.9,45.6,49,40.2,53.7,35.8,17.9,17.6,19,36.6,24,17.2,26.5,27.5,13.2,14.7,60.6,12.5)
+# 
+# chrom_info$left_width <- NA
+# chrom_info$right_width <- NA
+# for(row in 1:nrow(chrom_info)){
+#  chrom_info$left_width[row] <- paste(chrom_info$chrom_name[row], "stem", collapse = " ")
+#  chrom_info$right_width[row] <- paste(chrom_info$chrom_name[row], "diff", collapse = " ")
+# 
+# }
+ # pdf("../../figures/piRNA_Clusters.pdf", 12,4)
+
+  ggplot() +
+     #chromosome
+    geom_bar(data = chromosome_info, aes(x = chromosome, y = chromosome_length),alpha = .5, stat = "identity",width = 1) +
+    geom_text(data = chromosome_info, aes( x= chromosome, y = chromosome_length + 10, label = chromosome)) +
+    #cluster location bar
+    geom_segment(data=lollipop,aes(x = chromosome, xend = x_cord, y = start , yend = start, color = cluster_count)) +
+    #cluster location point
+    geom_point(data=lollipop, aes(x = x_cord, y = start, color = cluster_count, shape = cell_type), size = 1, alpha = .5) +
+    #geom_point(data = chrom_info, aes(x = chrom_name, y = centromere), color = c("white"), shape = '-', size = 20) +  
+    #geom_point(data = chrom_info, aes(x = chrom_name, y = centromere), shape = '-', size = 15) +  
+    #geom_segment(data = chrom_info, aes(x = chromosome, xend = x_cord, y = start, yend = start, color = cluster_count)) +    
+   
+    #centromere figure
+    geom_tile(data = chromosome_info, aes(x = chromosome, y = centromere,height = 1, width = 1), fill = "white") +
+    geom_tile(data = chromosome_info, aes(x = chromosome, y = centromere,height = 1, width = .75)) +
+    ylab("Location (Mbp)") + 
+    xlab("Chromosome") +
+    scale_y_continuous(labels = comma, breaks = c(50,100,150,200,250,300)) +
+    scale_x_discrete(limit = levels(lollipop$x_cord), breaks = NULL) +
+    ggtitle("Cluster Locations on Chromosomes") +
+    theme_bw() +  
+    labs(color = "Frequency of Cluster", shape = "Cell Type") +
+    #scale_shape_discrete(breaks=c("stem","diff"), labels = c("Stem", "Differentiated")) +
+    scale_shape_manual(values = c(19, 17),breaks=c("stem","diff"), labels = c("GSC", "GBM")) +
+    scale_color_continuous(breaks = c(1,2,3,4,5,6,7,8), trans = "reverse") +
+    #hide the x axis information
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          legend.position = c(.8,.65),
+          legend.background = element_blank())
+          #legend.key.height =  unit(.4,"cm"),
+          #legend.key.width =  unit(1,"cm"))
+  
+ # dev.off()
+
+```
+
+
+```{r cluster_plots, echo = FALSE}
+
+#test <- all_clusters[(all_clusters$chromosome == 2 & (all_clusters$start > 68556068) & (all_clusters$start < 68836068)),  ]
+
+cluster_plot <- function(chromosome){
+  #create the data frame for ggplot to use
+  data <- all_clusters[all_clusters$chromosome == chromosome,]
+  
+  ggplot(data, aes(x=start, xend=end, y=cell_line, yend=cell_line, color= cell_type)) +
+    geom_segment(size=3) +
+    geom_point(size=3) +
+    geom_point(aes(x=end), size=2, shape = 18) +
+    ggtitle(paste("Chromosome", chromosome, collapse = " ")) + 
+    ylab("Cell Line") + 
+    xlab("Cluster Location") +
+    scale_x_continuous(labels = comma)
+}
+
+plots <- lapply(X = sort(unique(all_clusters$chromosome), decreasing = FALSE), FUN = cluster_plot)
+print(plots)
+
+```
+
+
+
+```{r additional plots}
+
 
 #manhattan
 ggplot(data = man_clusters) +
@@ -257,87 +349,4 @@ ggplot(data = DE_clusters) +
 man_clusters$cluster_count[man_clusters$cell_type == "diff"] <- man_clusters$cluster_count[man_clusters$cell_type == "diff"]*-1
 ```
 
-
-
-```{r lollipop, warning=FALSE}
-
-
-#make differentiated counts positive again
-
-
-#data for lollipop plot
-lollipop <- man_clusters[man_clusters$chromosome != "MT",]
-for(row in 1:nrow(lollipop)){
-  lollipop$x_cord[row] <- paste(lollipop$chromosome[row], lollipop$cell_type[row], collapse = " ")
-}
-
-chromosome_celltype <- c()
-for(chrom in c(as.character(1:22), "X","Y")){
- chromosome_celltype[length(chromosome_celltype) + 1] <- paste(chrom, "stem", collapse = " ")
- chromosome_celltype[length(chromosome_celltype) + 1] <- chrom
- chromosome_celltype[length(chromosome_celltype) + 1] <- paste(chrom, "diff", collapse = " ") 
-}
-
-
-lollipop$x_cord <- factor(lollipop$x_cord,levels = chromosome_celltype)
-lollipop$start <- lollipop$start/1000000
-lollipop$end <- lollipop$end/1000000
-
-#lollipop$start_jitter <- jitter(lollipop$start,40)
-
-
-
-#vector holding chromosome info
-chromosome_info <- as.data.frame(c(248956422,242193529,198295559,190214555, 181538259, 170805979, 159345973 , 145138636, 138394717, 133797422,135086622, 133275309, 114364328, 107043718, 101991189,  90338345,  83257441,  80373285,  58617616, 64444167, 46709983 ,50818468, 156040895 ,  57227415)/1000000)
-colnames(chromosome_info) <- c("chromosome_length")
-chromosome_info$chromosome <- factor(c(as.character(1:22), "X","Y"), levels = levels(lollipop$x_cord))
-#chromosome_info$chromosome <- c(as.character(1:22), "X","Y")
-
-chromosome_info$centromere <- c(125,93.3,91,50.4,48.4,61,59.9,45.6,49,40.2,53.7,35.8,17.9,17.6,19,36.6,24,17.2,26.5,27.5,13.2,14.7,60.6,12.5)
-# 
-# chrom_info$left_width <- NA
-# chrom_info$right_width <- NA
-# for(row in 1:nrow(chrom_info)){
-#  chrom_info$left_width[row] <- paste(chrom_info$chrom_name[row], "stem", collapse = " ")
-#  chrom_info$right_width[row] <- paste(chrom_info$chrom_name[row], "diff", collapse = " ")
-# 
-# }
-  pdf("../../figures/piRNA_Clusters.pdf", 12,4)
-
-  ggplot() +
-     #chromosome
-    geom_bar(data = chromosome_info, aes(x = chromosome, y = chromosome_length),alpha = .5, stat = "identity",width = 1) +
-    geom_text(data = chromosome_info, aes( x= chromosome, y = chromosome_length + 10, label = chromosome)) +
-    #cluster location bar
-    geom_segment(data=lollipop,aes(x = chromosome, xend = x_cord, y = start , yend = start, color = cluster_count)) +
-    #cluster location point
-    geom_point(data=lollipop, aes(x = x_cord, y = start, color = cluster_count, shape = cell_type), size = 1, alpha = .5) +
-    #geom_point(data = chrom_info, aes(x = chrom_name, y = centromere), color = c("white"), shape = '-', size = 20) +  
-    #geom_point(data = chrom_info, aes(x = chrom_name, y = centromere), shape = '-', size = 15) +  
-    #geom_segment(data = chrom_info, aes(x = chromosome, xend = x_cord, y = start, yend = start, color = cluster_count)) +    
-   
-    #centromere figure
-    geom_tile(data = chromosome_info, aes(x = chromosome, y = centromere,height = 1, width = 1), fill = "white") +
-    geom_tile(data = chromosome_info, aes(x = chromosome, y = centromere,height = 1, width = .75)) +
-    ylab("Location (Mbp)") + 
-    xlab("Chromosome") +
-    scale_y_continuous(labels = comma, breaks = c(50,100,150,200,250,300)) +
-    scale_x_discrete(limit = levels(lollipop$x_cord), breaks = NULL) +
-    ggtitle("Cluster Locations on Chromosomes") +
-    theme_bw() +  
-    labs(color = "Frequency of Cluster", shape = "Cell Type") +
-    #scale_shape_discrete(breaks=c("stem","diff"), labels = c("Stem", "Differentiated")) +
-    scale_shape_manual(values = c(19, 17),breaks=c("stem","diff"), labels = c("GSC", "GBM")) +
-    scale_color_continuous(breaks = c(1,2,3,4,5,6,7,8), trans = "reverse") +
-    #hide the x axis information
-    theme(axis.text.x = element_blank(),
-          axis.ticks.x = element_blank(),
-          legend.position = c(.8,.65),
-          legend.background = element_blank())
-          #legend.key.height =  unit(.4,"cm"),
-          #legend.key.width =  unit(1,"cm"))
-  
-  dev.off()
-
-```
 
